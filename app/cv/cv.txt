@@ -1,0 +1,537 @@
+"use client"
+
+import { AppSidebar } from "@/components/app-sidebar"
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
+import { Separator } from "@/components/ui/separator"
+import { CalendarNote } from "@/components/dashboard/calendar-note"
+import { Card } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
+import { Upload, FileText, Eye, Trash2, Download, Plus } from "lucide-react"
+import { useState, useCallback, useRef } from "react"
+import { createClient } from '@/utils/supabase/client'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { useToast } from "@/components/ui/use-toast"
+
+interface CVFile {
+  id: string
+  name: string
+  uploadedAt: Date
+  parsed: boolean
+}
+
+interface ParsedCV {
+  personalInfo: {
+    name: string
+    email: string
+    phone: string
+    address: string
+  }
+  experience: Array<{
+    company: string
+    position: string
+    startDate: string
+    endDate: string
+    description: string
+  }>
+  education: Array<{
+    school: string
+    degree: string
+    field: string
+    startDate: string
+    endDate: string
+  }>
+  skills: string[]
+}
+
+interface JobOffer {
+  id: string
+  position: string
+  company: string
+  requirements: string[]
+}
+
+export default function CVPage() {
+  const [activeTab, setActiveTab] = useState("upload")
+  const [files, setFiles] = useState<CVFile[]>([])
+  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [parsedCV, setParsedCV] = useState<ParsedCV | null>(null)
+  const [isUploading, setIsUploading] = useState(false)
+  const [isParsing, setIsParsing] = useState(false)
+  const [selectedJobOffer, setSelectedJobOffer] = useState<JobOffer | null>(null)
+  const { toast } = useToast()
+  const [isDragging, setIsDragging] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleButtonClick = () => {
+    fileInputRef.current?.click()
+  }
+
+  const processCV = async (file: File) => {
+    try {
+      // Najpierw wyciągamy tekst z pliku
+      let cvText = ''
+      
+      if (file.type === 'application/pdf') {
+        const formData = new FormData()
+        formData.append('file', file)
+        
+        const extractResponse = await fetch('/api/extract-text', {
+          method: 'POST',
+          body: formData,
+        })
+
+        if (!extractResponse.ok) {
+          throw new Error('Błąd podczas wyciągania tekstu z PDF')
+        }
+
+        const extractData = await extractResponse.json()
+        cvText = extractData.text
+      } else if (file.type === 'text/plain') {
+        cvText = await file.text()
+      } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        const formData = new FormData()
+        formData.append('file', file)
+        
+        const extractResponse = await fetch('/api/extract-docx', {
+          method: 'POST',
+          body: formData,
+        })
+
+        if (!extractResponse.ok) {
+          throw new Error('Błąd podczas wyciągania tekstu z DOCX')
+        }
+
+        const extractData = await extractResponse.json()
+        cvText = extractData.text
+      }
+
+      // Następnie wysyłamy wyciągnięty tekst do API przetwarzania CV
+      const response = await fetch('/api/process-cv', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ cv_text: cvText }),
+        })
+
+      if (!response.ok) {
+        throw new Error('Błąd podczas przetwarzania CV')
+      }
+
+      const data = await response.json()
+      setParsedCV(data)
+      return data
+    } catch (error) {
+      console.error('Błąd podczas przetwarzania CV:', error)
+      throw error
+    }
+  }
+
+  const handleFileUpload = async (file: File) => {
+    if (!file) return
+
+    setIsUploading(true)
+    try {
+      // Sprawdzanie typu pliku
+      const allowedTypes = [
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'text/plain'
+      ]
+      
+      if (!allowedTypes.includes(file.type)) {
+        toast({
+          title: "Błąd",
+          description: "Dozwolone formaty plików: PDF, DOCX, TXT",
+          variant: "destructive",
+        })
+        return
+      }
+
+      setIsParsing(true)
+      const parsedData = await processCV(file)
+
+      const newFile: CVFile = {
+        id: Math.random().toString(36).substr(2, 9),
+        name: file.name,
+        uploadedAt: new Date(),
+        parsed: true
+      }
+
+      setFiles(prev => [...prev, newFile])
+      setSelectedFile(newFile.id)
+
+      toast({
+        title: "Sukces",
+        description: "CV zostało przetworzone pomyślnie",
+      })
+    } catch (error) {
+      console.error('Błąd podczas uploadowania pliku:', error)
+      toast({
+        title: "Błąd",
+        description: "Nie udało się przetworzyć CV",
+        variant: "destructive",
+      })
+    } finally {
+      setIsUploading(false)
+      setIsParsing(false)
+    }
+  }
+
+  const handleFileSelect = (fileId: string) => {
+    setSelectedFile(fileId)
+    // Tutaj dodamy logikę pobierania sparsowanych danych z bazy
+  }
+
+  const handleFileDelete = async (fileId: string) => {
+    // Tutaj dodamy logikę usuwania pliku
+    setFiles(prev => prev.filter(f => f.id !== fileId))
+    if (selectedFile === fileId) {
+      setSelectedFile(null)
+      setParsedCV(null)
+    }
+  }
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+
+    const file = e.dataTransfer.files[0]
+    if (file) {
+      handleFileUpload(file)
+    }
+  }, [])
+
+  return (
+    <SidebarProvider>
+      <AppSidebar />
+      <SidebarInset className="bg-gray-50 p-0">
+        <header className="flex h-16 shrink-0 items-center border-b border-gray-100/50 bg-gray-50">
+          <div className="flex items-center gap-8 ml-4">
+            <Separator orientation="vertical" className="mr-2 h-4" />
+          </div>
+          <CalendarNote />
+        </header>
+        <div className="container mx-auto p-6">
+          <Tabs defaultValue="upload" className="w-full" onValueChange={setActiveTab}>
+            <TabsList className="grid w-full grid-cols-2 mb-6">
+              <TabsTrigger value="upload" className="flex items-center gap-2">
+                <Upload className="w-4 h-4" />
+                Upload CV
+              </TabsTrigger>
+              <TabsTrigger value="creator" className="flex items-center gap-2">
+                <Plus className="w-4 h-4" />
+                Kreator CV
+              </TabsTrigger>
+            </TabsList>
+
+            {/* Zakładka Upload CV */}
+            <TabsContent value="upload">
+              <div className="flex h-[calc(100vh-12rem)]">
+                {/* Lewa kolumna - upload i lista */}
+                <div className="w-1/3 border-r border-gray-200 flex flex-col">
+                  {/* Górna część - upload */}
+                  <div className="p-6 border-b border-gray-200">
+                    <Card 
+                      className={`p-6 ${isDragging ? 'border-2 border-dashed border-purple-600' : ''}`}
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                    >
+                      <div className="flex flex-col items-center gap-4">
+                        <div className={`w-16 h-16 rounded-full flex items-center justify-center transition-colors ${
+                          isDragging ? 'bg-purple-200' : 'bg-purple-100'
+                        }`}>
+                          <Upload className={`w-8 h-8 ${isDragging ? 'text-purple-700' : 'text-purple-600'}`} />
+                        </div>
+              <div className="text-center">
+                          <h3 className="font-semibold mb-1">
+                            {isDragging ? 'Upuść plik tutaj' : 'Prześlij swoje CV'}
+                          </h3>
+                          <p className="text-sm text-gray-500 mb-4">
+                            Przeciągnij i upuść plik lub kliknij aby wybrać
+                          </p>
+                          <p className="text-xs text-gray-400">
+                            Obsługiwane formaty: PDF, DOCX, TXT
+                          </p>
+              </div>
+                <input
+                  type="file"
+                          ref={fileInputRef}
+                  className="hidden"
+                          accept=".pdf,.docx,.txt"
+                          onChange={(e) => {
+                            const file = e.target.files?.[0]
+                            if (file) handleFileUpload(file)
+                          }}
+                        />
+                        <Button
+                          variant="outline"
+                          className="cursor-pointer"
+                          disabled={isUploading || isParsing}
+                          onClick={handleButtonClick}
+                        >
+                          {isUploading ? 'Przesyłanie...' : 
+                           isParsing ? 'Przetwarzanie...' : 
+                           'Wybierz plik'}
+                        </Button>
+                      </div>
+                    </Card>
+                  </div>
+                  
+                  {/* Dolna część - lista plików */}
+                  <div className="flex-1 overflow-auto p-6">
+                    <h3 className="font-semibold mb-4">Przesłane pliki</h3>
+                    <div className="space-y-3">
+                      {files.map(file => (
+                        <Card
+                          key={file.id}
+                          className={`p-4 cursor-pointer transition-colors ${
+                            selectedFile === file.id ? 'border-purple-600' : ''
+                          }`}
+                          onClick={() => handleFileSelect(file.id)}
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <FileText className="w-5 h-5 text-purple-600" />
+                              <div>
+                                <p className="font-medium">{file.name}</p>
+                                <p className="text-sm text-gray-500">
+                                  {file.uploadedAt.toLocaleDateString()}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  handleFileDelete(file.id)
+                                }}
+                              >
+                                <Trash2 className="w-4 h-4 text-red-600" />
+                              </Button>
+                            </div>
+                          </div>
+                        </Card>
+                      ))}
+                      {files.length === 0 && (
+                        <p className="text-center text-gray-500 py-4">
+                          Brak przesłanych plików
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {/* Prawa kolumna - podgląd */}
+                <div className="flex-1 p-6 bg-gray-50">
+                  {selectedFile ? (
+                    <div className="h-full">
+                      <div className="flex justify-between items-center mb-6">
+                        <h2 className="text-2xl font-bold">Podgląd CV</h2>
+                        <Button variant="outline" className="flex items-center gap-2">
+                          <Download className="w-4 h-4" />
+                          Pobierz PDF
+                        </Button>
+                      </div>
+                      <Card className="h-[calc(100%-4rem)] overflow-auto p-8">
+                        {parsedCV ? (
+                          <div className="max-w-3xl mx-auto">
+                            {/* Tutaj szablon CV */}
+                            <div className="mb-8">
+                              <h1 className="text-2xl font-bold mb-2">{parsedCV.personalInfo.name}</h1>
+                              <div className="text-gray-600">
+                                <p>{parsedCV.personalInfo.email}</p>
+                                <p>{parsedCV.personalInfo.phone}</p>
+                                <p>{parsedCV.personalInfo.address}</p>
+                              </div>
+                            </div>
+
+                            <div className="mb-8">
+                              <h2 className="text-xl font-semibold mb-4">Doświadczenie</h2>
+                              {parsedCV.experience.map((exp, index) => (
+                                <div key={index} className="mb-4">
+                                  <h3 className="font-medium">{exp.position}</h3>
+                                  <p className="text-purple-600">{exp.company}</p>
+                                  <p className="text-sm text-gray-500">
+                                    {exp.startDate} - {exp.endDate}
+                                  </p>
+                                  <p className="mt-2">{exp.description}</p>
+                                </div>
+                              ))}
+                            </div>
+
+                            <div className="mb-8">
+                              <h2 className="text-xl font-semibold mb-4">Wykształcenie</h2>
+                              {parsedCV.education.map((edu, index) => (
+                                <div key={index} className="mb-4">
+                                  <h3 className="font-medium">{edu.school}</h3>
+                                  <p className="text-purple-600">{edu.degree} - {edu.field}</p>
+                                  <p className="text-sm text-gray-500">
+                                    {edu.startDate} - {edu.endDate}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+
+                            <div>
+                              <h2 className="text-xl font-semibold mb-4">Umiejętności</h2>
+                              <div className="flex flex-wrap gap-2">
+                                {parsedCV.skills.map((skill, index) => (
+                                  <span
+                                    key={index}
+                                    className="bg-purple-100 text-purple-600 px-3 py-1 rounded-full text-sm"
+                                  >
+                                    {skill}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center h-full text-gray-500">
+                            {isParsing ? 'Przetwarzanie CV...' : 'Wybierz plik CV aby zobaczyć podgląd'}
+                          </div>
+                        )}
+                      </Card>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-gray-500">
+                      Wybierz plik CV aby zobaczyć podgląd
+                    </div>
+                  )}
+                </div>
+              </div>
+            </TabsContent>
+
+            {/* Zakładka Kreator CV */}
+            <TabsContent value="creator">
+              <div className="flex h-[calc(100vh-12rem)]">
+                {/* Lewa kolumna - formularz */}
+                <div className="w-1/3 border-r border-gray-200 overflow-auto p-6">
+                  <Card className="p-6">
+                    <div className="space-y-6">
+                      <div>
+                        <h3 className="text-lg font-semibold mb-4">Wybierz ofertę pracy</h3>
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <Label>Stanowisko</Label>
+                            <Input placeholder="np. Frontend Developer" />
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Firma</Label>
+                            <Input placeholder="np. Tech Solutions Sp. z o.o." />
+                          </div>
+                          <Button className="w-full">
+                            Wyszukaj zapisane oferty
+                          </Button>
+                        </div>
+                      </div>
+
+                      <Separator />
+
+                      <div>
+                        <h3 className="text-lg font-semibold mb-4">Dostosuj sekcje CV</h3>
+                        <div className="space-y-4">
+                          <div className="space-y-2">
+                            <Label>Podsumowanie zawodowe</Label>
+                            <textarea 
+                              className="w-full min-h-[100px] p-2 border rounded-md"
+                              placeholder="Krótkie podsumowanie Twojego doświadczenia..."
+                            />
+                          </div>
+                          
+                          <div className="space-y-2">
+                            <Label>Kluczowe umiejętności</Label>
+                            <div className="flex flex-wrap gap-2">
+                              <Button variant="outline" size="sm">
+                                + Dodaj umiejętność
+                              </Button>
+            </div>
+          </div>
+
+                          <div className="space-y-2">
+                            <Label>Doświadczenie zawodowe</Label>
+                            <Button variant="outline" className="w-full">
+                              + Dodaj doświadczenie
+                            </Button>
+                          </div>
+
+                          <div className="space-y-2">
+                            <Label>Wykształcenie</Label>
+                            <Button variant="outline" className="w-full">
+                              + Dodaj wykształcenie
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                </div>
+
+                {/* Prawa kolumna - podgląd i analiza */}
+                <div className="flex-1 p-6">
+                  <div className="grid grid-cols-1 gap-6">
+                    {/* Analiza dopasowania */}
+                    <Card className="p-6">
+                      <h3 className="text-lg font-semibold mb-4">Analiza dopasowania</h3>
+                      <div className="space-y-4">
+                        <div>
+                          <div className="flex justify-between mb-2">
+                            <span>Dopasowanie do wymagań</span>
+                            <span className="font-semibold">75%</span>
+                          </div>
+                          <div className="w-full bg-gray-200 rounded-full h-2">
+                            <div className="bg-purple-600 h-2 rounded-full" style={{ width: '75%' }} />
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <p className="font-medium">Sugestie ulepszeń:</p>
+                          <ul className="list-disc list-inside text-sm text-gray-600 space-y-1">
+                            <li>Dodaj więcej szczegółów o doświadczeniu z React.js</li>
+                            <li>Uwzględnij projekty związane z TypeScript</li>
+                            <li>Podkreśl doświadczenie w pracy zespołowej</li>
+                          </ul>
+                    </div>
+                    </div>
+                    </Card>
+
+                    {/* Podgląd CV */}
+                    <Card className="p-6">
+                      <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-lg font-semibold">Podgląd CV</h3>
+                        <Button variant="outline" className="flex items-center gap-2">
+                          <Download className="w-4 h-4" />
+                          Eksportuj do PDF
+                      </Button>
+                    </div>
+                      <div className="border rounded-lg p-6 min-h-[500px]">
+                        {/* Tu będzie podgląd generowanego CV */}
+                      </div>
+                    </Card>
+                  </div>
+                </div>
+            </div>
+            </TabsContent>
+          </Tabs>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
+  )
+}

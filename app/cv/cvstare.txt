@@ -1,0 +1,330 @@
+"use client"
+
+import { useEffect, useState } from "react"
+import { AppSidebar } from "@/components/app-sidebar"
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbList,
+  BreadcrumbPage,
+} from "@/components/ui/breadcrumb"
+import { Separator } from "@/components/ui/separator"
+import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
+import { Button } from "@/components/ui/button"
+import { Upload, Plus, FileText, Loader2 } from "lucide-react"
+import { createClient } from '@/utils/supabase/client'
+import { useToast } from "@/components/ui/use-toast"
+import * as pdfjsLib from 'pdfjs-dist'
+import mammoth from 'mammoth'
+import { CalendarNote } from "@/components/dashboard/calendar-note"
+
+// Inicjalizacja PDF.js
+if (typeof window !== 'undefined') {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+}
+;
+type CV = {
+  id: number
+  owner: string
+  cv: string
+  created_at: string
+  filename?: string | null;
+  experience?: string | null;
+  skills?: string | null;
+  education?: string | null;
+  other?: string | null;
+}
+
+export default function CVPage() {
+  const [cvList, setCVList] = useState<CV[]>([])
+  const [loading, setLoading] = useState(true)
+  const [isProcessing, setIsProcessing] = useState<number | null>(null)
+  const [isUploading, setIsUploading] = useState(false);
+  const [fileName, setFileName] = useState<string>('');
+  const { toast } = useToast()
+
+  useEffect(() => {
+    fetchCVs()
+  }, [])
+
+  const fetchCVs = async () => {
+    try {
+      const supabase = createClient()
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+
+      if (sessionError || !session) {
+        setLoading(false)
+        return
+      }
+
+      const { data, error } = await supabase
+        .from('cv_data')
+        .select('*')
+        .eq('owner', session.user.id)
+        .order('created_at', { ascending: false })
+
+      if (error && error.code !== 'PGRST116') { // Ignorujemy błąd "Relation cv does not exist"
+        console.error('Błąd podczas pobierania CV:', error.message)
+        toast({
+          title: "Błąd",
+          description: "Nie udało się pobrać listy CV",
+          variant: "destructive",
+        })
+      }
+
+      setCVList(data || [])
+    } catch (err) {
+      // Ignorujemy błędy związane z brakiem tabeli/danych
+      console.log('Info: Brak danych CV')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const parseCV = async (file: File) => {
+    try {
+      let text = '';
+
+      // Parsowanie w zależności od typu pliku
+      if (file.type === 'application/pdf') {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const numPages = pdf.numPages;
+        const textContent = [];
+
+        for (let i = 1; i <= numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          const pageText = content.items.map((item: any) => item.str).join(' ');
+          textContent.push(pageText);
+        }
+
+        text = textContent.join('\n');
+      } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        text = result.value;
+      } else if (file.type === 'application/msword') {
+        throw new Error('Format DOC nie jest obecnie obsługiwany. Proszę użyć formatu DOCX lub PDF.');
+      } else {
+        throw new Error('Nieobsługiwany format pliku. Proszę użyć formatu PDF lub DOCX.');
+      }
+
+      return text;
+    } catch (error) {
+      console.error('Błąd podczas parsowania CV:', error);
+      throw error;
+    }
+  };
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    try {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (!fileName.trim()) {
+        toast({
+          title: "Błąd",
+          description: "Proszę wprowadzić nazwę pliku.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setIsUploading(true);
+      setIsProcessing(null); // resetujemy stan dla nowego uploadu
+
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (!session) return;
+
+      // Parsowanie CV do tekstu
+      const cvText = await parseCV(file);
+
+      // Zapisz tekst CV w bazie
+      const { data: cvData, error: dbError } = await supabase
+        .from('cv_data')
+        .insert([
+          {
+            owner: session.user.id,
+            cv: cvText,
+            filename: fileName.trim()
+          }
+        ])
+        .select()
+        .single(); // Używamy single() bo wiemy, że insert zwraca jeden rekord
+
+      if (dbError) throw dbError;
+
+      setIsProcessing(cvData.id);
+
+      // Wyślij CV do przetworzenia przez AI
+      const response = await fetch('/api/process-cv', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          cv_text: cvText,
+          user_id: session.user.id
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Nie udało się przetworzyć CV przez AI');
+      }
+
+      const processedData = await response.json();
+
+      // Zaktualizuj rekord CV o przetworzone dane
+      const { error: updateError } = await supabase
+        .from('cv_data')
+        .update({
+          experience: processedData.experience,
+          skills: processedData.skills,
+          education: processedData.education,
+          other: processedData.other
+        })
+        .eq('id', cvData.id)
+
+      if (updateError) throw updateError
+
+      toast({
+        title: "CV zostało zapisane i przetworzone",
+        description: "CV zostało pomyślnie zapisane w bazie danych i przetworzone przez AI",
+      })
+
+      // Odśwież listę CV
+      fetchCVs()
+      setFileName(''); // Resetuj nazwę pliku po udanym uploadzie
+    } catch (err) {
+      console.error('Błąd podczas przetwarzania CV:', err)
+      toast({
+        title: "Błąd",
+        description: err instanceof Error ? err.message : "Nie udało się przetworzyć CV",
+        variant: "destructive",
+      })
+    } finally {
+      setIsUploading(false);
+      setIsProcessing(null);
+    }
+  }
+
+  return (
+    <SidebarProvider>
+      <AppSidebar />
+      <SidebarInset className="bg-gray-50 p-0">
+        <header className="flex h-16 shrink-0 items-center border-b border-gray-100/50 bg-gray-50">
+          <div className="flex items-center gap-8 ml-4">
+            <Separator orientation="vertical" className="mr-2 h-4" />
+          </div>
+          <CalendarNote />
+        </header>
+        <div className="flex h-full">
+          {/* Lewa strona - upload */}
+          <div className="w-1/2 p-8 border-r">
+            <div className="flex flex-col items-center justify-center h-full space-y-4">
+              <div className="text-center">
+                <h2 className="text-2xl font-semibold mb-2">Dodaj nowe CV</h2>
+                <p className="text-gray-500 mb-6">Przeciągnij plik lub kliknij aby wybrać</p>
+              </div>
+              <div className="w-full max-w-sm space-y-2">
+                <label htmlFor="file-name" className="block text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">
+                  Nazwa pliku
+                </label>
+                <input
+                  type="text"
+                  id="file-name"
+                  placeholder="Nazwa Twojego CV"
+                  value={fileName}
+                  onChange={(e) => setFileName(e.target.value)}
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                />
+              </div>
+              <label className="relative cursor-pointer">
+                <input
+                  type="file"
+                  className="hidden"
+                  accept=".pdf,.doc,.docx"
+                  onChange={handleFileUpload}
+                />
+                <div className="flex flex-col items-center justify-center w-64 h-64 border-2 border-dashed rounded-lg hover:bg-gray-50 transition-colors">
+                  {isUploading ? (
+                    <Loader2 className="w-12 h-12 animate-spin text-blue-500" />
+                  ) : (
+                    <>
+                      <Upload className="w-12 h-12 text-gray-400 mb-2" />
+                      <span className="text-sm text-gray-500">PDF, DOC, DOCX</span>
+                    </>
+                  )}
+                </div>
+              </label>
+              {isUploading && <p className="text-sm text-gray-500">Przetwarzanie pliku...</p>}
+            </div>
+          </div>
+
+          {/* Prawa strona - lista CV */}
+          <div className="w-1/2 p-8">
+            <h2 className="text-2xl font-semibold mb-6">Twoje dokumenty</h2>
+            <div className="grid grid-cols-2 gap-4">
+              {loading ? (
+                <div className="col-span-2 text-center py-8">Ładowanie...</div>
+              ) : cvList.length > 0 ? (
+                cvList.map((cv) => (
+                  <div
+                    key={cv.id}
+                    className="p-4 border rounded-lg hover:shadow-md transition-shadow relative"
+                  >
+                    {isProcessing === cv.id && (
+                      <div className="absolute inset-0 bg-white/80 flex items-center justify-center rounded-lg z-10">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+                      </div>
+                    )}
+                    <div className="flex items-start justify-between">
+                      <FileText className="w-8 h-8 text-blue-500" />
+                      {/* <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                        CV # - {cv.filename}
+                      </span> */}
+                    </div>
+                    <div className="mt-3">
+                      <h3 className="font-medium">{cv.filename || 'Dokument CV'}</h3>
+                      <p className="text-sm text-gray-500 mt-1">
+                        Dodano: {new Date(cv.created_at).toLocaleDateString('pl-PL')}
+                      </p>
+                    </div>
+                    <div className="mt-4">
+                      <p className="text-sm text-gray-600 line-clamp-3">
+                        {cv.cv ? cv.cv.substring(0, 150) + '...' : 'Brak treści CV'}
+                      </p>
+                    </div>
+                    <div className="mt-4 flex space-x-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="w-full text-red-600 hover:text-red-700"
+                        onClick={async () => {
+                          const supabase = createClient()
+                          await supabase.from('cv_data').delete().eq('id', cv.id)
+                          fetchCVs()
+                          toast({
+                            title: "CV zostało usunięte",
+                          })
+                        }}
+                      >
+                        Usuń
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="col-span-2 text-center py-8 text-gray-500">
+                  Nie masz jeszcze żadnych dokumentów CV
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </SidebarInset>
+    </SidebarProvider>
+  )
+}
