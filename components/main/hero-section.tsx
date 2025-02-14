@@ -26,7 +26,7 @@ export function HeroSection() {
               </div>
               <h1 className="text-4xl font-extrabold tracking-tighter sm:text-5xl xl:text-6xl/none">
                 <span className="bg-gradient-to-r from-purple-600 to-cyan-500 bg-clip-text text-transparent drop-shadow-[0_1.2px_1.2px_rgba(0,0,0,0.3)]">
-                  Zautomatyzuj swoją drogę do wymarzonej pracy
+                  Zmień sposób w jaki szukasz pracy
                 </span>
               </h1>
             </div>
